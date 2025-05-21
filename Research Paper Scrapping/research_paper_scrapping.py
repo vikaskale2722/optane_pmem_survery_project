@@ -1,113 +1,163 @@
-import requests
-import pandas as pd
 import time
 import random
-from bs4 import BeautifulSoup
+import csv
+import re
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from fake_useragent import UserAgent
 
 #Configuration
-USERNAME = "vikaskale_6h9cq"
-PASSWORD = "" # Add your password here
-primary_keywords = ["Optane"]
-secondary_keywords = ["data structure", "index structure", "database", "storage engine", "file system", "high performance computing"]
-max_pages_per_query = 50
-output_file = "research_papers.csv"
 
-#Containers
-papers = []
-seen_titles = set()
-zero_result_keywords = []
+
+primary_keyword   = "optane"
+'''
+secondary_keywords = ["data structure"(done), "index structure"(done), "database(done)", "storage engine(done)", "file system(done)", "high performance computing(done)"]
+'''
+secondary_keyword = "database"
+# QUERY             = f"'{primary_keyword}' + '{secondary_keyword}'"
+QUERY = f"%27{primary_keyword}%27+%2B+%27{secondary_keyword}%27"
+TOTAL             = 300
+PER_PAGE          = 10
+PROXY_LIST        = []  # e.g. ["123.45.67.89:8080", "socks5://98.76.54.32:1080"]
+print(QUERY)
+UA = UserAgent()
 
 #Helper Functions
+def get_options(proxy: str = None):
+    opts = webdriver.ChromeOptions()
+    # run in headed mode so you can solve CAPTCHAs
+    opts.headless = False
+    # randomize User-Agent
+    opts.add_argument(f"--user-agent={UA.random}")
+    # disable selenium flags
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    # optional proxy
+    if proxy:
+        if not proxy.startswith(("http://","https://","socks4://","socks5://")):
+            proxy = "http://" + proxy
+        opts.add_argument(f"--proxy-server={proxy}")
+    return opts
 
-def get_html_for_page(url):
-    payload = {"url": url, "source": "google"}
-    response = requests.post(
-        "https://realtime.oxylabs.io/v1/queries",
-        auth=(USERNAME, PASSWORD),
-        json=payload,
-    )
-    response.raise_for_status()
-    return response.json()["results"][0]["content"]
-
-def safe_get_html(url, retries=3):
-    for attempt in range(retries):
+def parse_page(driver):
+    out = []
+    entries = driver.find_elements(By.CSS_SELECTOR, "div.gs_ri")
+    for e in entries:
+        # Title & link
         try:
-            html = get_html_for_page(url)
-            if "gs_ri" in html:
-                return html
+            h3 = e.find_element(By.CSS_SELECTOR, "h3.gs_rt")
+            a  = h3.find_element(By.TAG_NAME, "a")
+            title = a.text
+            link  = a.get_attribute("href")
+        except:
+            title = e.find_element(By.CSS_SELECTOR, "h3.gs_rt").text or ""
+            link  = ""
+
+        # Meta line (authors/journal/year)
+        meta_txt = ""
+        try:
+            meta_txt = e.find_element(By.CSS_SELECTOR, "div.gs_a").text
+        except:
+            pass
+
+        # Extract year
+        year = ""
+        m = re.search(r"\b(19|20)\d{2}\b", meta_txt)
+        if m:
+            year = m.group(0)
+
+        # Number of citations
+        cited_by = 0
+        try:
+            for a in e.find_elements(By.TAG_NAME, "a"):
+                txt = a.text
+                if txt.startswith("Cited by"):
+                    cited_by = int(txt.split()[-1])
+                    break
+        except:
+            pass
+
+        # Build record with extra columns
+        out.append({
+            "Paper title": title,
+            "Paper link": link,
+            "Year of publishing": year,
+            "Number of citations": cited_by,
+            "Keywords": f'"{primary_keyword.capitalize()}" "{secondary_keyword.title()}"',
+            "Relevant for study": "Yes" if year and int(year) >= 2019 else "No",
+            "Duplicate": "",
+            "Reviewer": "",
+            "Applicable/Non Applicable": "",
+            "Reason for choosing/ not choosing the research paper": ""
+        })
+    return out
+
+#Main Scraper
+def scrape():
+    results = []
+    for offset in range(0, TOTAL, PER_PAGE):
+        proxy  = random.choice(PROXY_LIST) if PROXY_LIST else None
+        opts   = get_options(proxy)
+        driver = webdriver.Chrome(options=opts)
+
+        url = (
+            "https://scholar.google.com/scholar?"
+            f"hl=en&q={QUERY.replace(' ', '+')}&start={offset}"
+        )
+        driver.get(url)
+
+        # Detect CAPTCHA
+        page_src = driver.page_source.lower()
+        if any(kw in page_src for kw in ["captcha", "unusual traffic", "verify you are human"]):
+            print(f"CAPTCHA detected at offset={offset}.")
+            print("Please solve it in the opened browser, then press Enter here to continue.")
+            input("Press Enter once CAPTCHA is solved…")
+
+        try:
+            # allow up to 60s for results to load
+            WebDriverWait(driver, 60).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div.gs_ri"))
+            )
+            batch = parse_page(driver)
+            if not batch:
+                print(f"[!] No results parsed at start={offset}")
+            else:
+                print(f"[+] Fetched {len(batch)} results @ start={offset}")
+                results.extend(batch)
         except Exception as e:
-            print(f"Retry {attempt + 1}/{retries} failed: {e}")
-        time.sleep(random.uniform(2, 4))
-    print(f"All retries failed for {url}")
-    return None
+            print(f"[!] Error @ start={offset}: {e}")
+        finally:
+            driver.quit()
 
-def get_url_for_page(query, page_index):
-    query_encoded = "+".join(query.split())
-    return f"https://scholar.google.com/scholar?start={page_index}&q={query_encoded}&hl=en&as_sdt=0,5"
+        #delay
+        time.sleep(random.uniform(5, 10))
+        if len(results) >= TOTAL:
+            break
 
-def add_paper(title, year, link, keyword, source):
-    key = (title.lower(), link.lower())
-    is_duplicate = "duplicate" if key in seen_titles else "not duplicate"
-    applicable = "applicable" if str(year).isdigit() and int(year) >= 2019 else "non applicable"
-    if is_duplicate == "not duplicate":
-        seen_titles.add(key)
-    papers.append({
-        "Paper Title": title,
-        "Year of Publishing": year,
-        "Paper Link": link,
-        "Search Keyword": keyword,
-        "Source": source,
-        "Applicable": applicable,
-        "Duplicate": is_duplicate
-    })
+    return results[:TOTAL]
 
-def extract_year(text):
-    import re
-    match = re.search(r"\b(20\d{2}|19\d{2})\b", text)
-    return match.group(0) if match else "N/A"
+def save_csv(data, path="optane_data_structure_papers.csv"):
+    fieldnames = [
+        "Paper title",
+        "Paper link",
+        "Year of publishing",
+        "Number of citations",
+        "Keywords",
+        "Relevant for study",
+        "Duplicate",
+        "Reviewer",
+        "Applicable/Non Applicable",
+        "Reason for choosing/ not choosing the research paper"
+    ]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in data:
+            writer.writerow(row)
+    print(f"Saved {len(data)} records to {path}")
 
-def scrape_google_scholar(query):
-    print(f"Scraping: {query}")
-    found_any = False
-    for page in range(0, max_pages_per_query * 10, 10):
-        url = get_url_for_page(query, page)
-        html = safe_get_html(url)
-        if not html:
-            continue
-        soup = BeautifulSoup(html, "html.parser")
-        results = soup.find_all("div", class_="gs_ri")
-        if not results:
-            print(f"No results found for '{query}' on page {page // 10 + 1}")
-            continue
-
-        found_any = True
-        for result in results:
-            title_elem = result.find("h3", class_="gs_rt")
-            link_elem = title_elem.find("a") if title_elem else None
-            title = title_elem.get_text(strip=True) if title_elem else "N/A"
-            link = link_elem["href"] if link_elem and "href" in link_elem.attrs else "N/A"
-            year = extract_year(result.find("div", class_="gs_a").text)
-            add_paper(title, year, link, query, "Google Scholar")
-        time.sleep(random.uniform(2, 4))
-    if not found_any:
-        zero_result_keywords.append(query)
-
-#Main Execution
-
-def main():
-    for primary in primary_keywords:
-        for secondary in secondary_keywords:
-            combined_query = f'"{primary}" "{secondary}"'
-            scrape_google_scholar(combined_query)
-
-    df = pd.DataFrame(papers)
-    df.to_csv(output_file, index=False)
-    print(f"\nDone. {len(papers)} papers saved to '{output_file}'")
-
-    if zero_result_keywords:
-        print("\nNo results found for these queries:")
-        for q in zero_result_keywords:
-            print("  -", q)
-
+#Entry Point
 if __name__ == "__main__":
-    main()
+    papers = scrape()
+    save_csv(papers)
