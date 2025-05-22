@@ -13,11 +13,11 @@ from fake_useragent import UserAgent
 
 primary_keyword   = "optane"
 '''
-secondary_keywords = ["data structure"(done), "index structure"(done), "database(done)", "storage engine(done)", "file system(done)", "high performance computing(done)"]
+secondary_keywords = ["data structure(done)", "index structure(done)", "database", "storage engine", "file system(done)", "high performance computing(done)"]
 '''
-secondary_keyword = "database"
-# QUERY             = f"'{primary_keyword}' + '{secondary_keyword}'"
-QUERY = f"%27{primary_keyword}%27+%2B+%27{secondary_keyword}%27"
+secondary_keyword = "storage+engine"
+QUERY = f'"{primary_keyword}"+%2B+"{secondary_keyword}"'
+
 TOTAL             = 300
 PER_PAGE          = 10
 PROXY_LIST        = []  # e.g. ["123.45.67.89:8080", "socks5://98.76.54.32:1080"]
